@@ -1,7 +1,7 @@
 """
 Media Downloader Engine powered by yt-dlp.
 Supports dynamic multi-resolution ladder: 480p, 720p, 1080p, 1440p (2K), 2160p (4K), 4320p (8K).
-Includes smart chunk splitter for files delivered to Telegram.
+Includes smart pre-download size estimation and chunk splitter for Telegram delivery.
 """
 
 import os
@@ -16,11 +16,97 @@ import config
 
 
 class MediaDownloader:
-    """Extracts resolution ladder and downloads at the user-selected resolution."""
+    """Extracts resolution ladder, estimates filesize before downloading, and downloads."""
 
     @staticmethod
-    def get_info_and_resolutions(url: str) -> Optional[Dict[str, Any]]:
-        """Extract metadata and list all available resolutions from 480p up to maximum."""
+    def _fallback_bitrate_kbps(height: int) -> int:
+        """Approximate average combined bitrate (video+audio) in kbps for given vertical resolution."""
+        if height <= 480:
+            return 1000
+        elif height <= 720:
+            return 2600
+        elif height <= 1080:
+            return 5200
+        elif height <= 1440:
+            return 10500
+        elif height <= 2160:
+            return 25000
+        else:
+            return 60000
+
+    @classmethod
+    def estimate_video_size_mb(cls, info: Dict[str, Any], target_height: int) -> int:
+        """Estimate file size in MB for target resolution BEFORE downloading."""
+        formats = info.get("formats", [])
+        duration = info.get("duration") or 0
+
+        # Find best video stream <= target_height
+        v_candidates = [
+            f for f in formats 
+            if f.get("vcodec") and f.get("vcodec") != "none" and f.get("height") and f["height"] <= target_height
+        ]
+        if not v_candidates:
+            v_candidates = [f for f in formats if f.get("vcodec") and f.get("vcodec") != "none"]
+
+        if not v_candidates:
+            br = cls._fallback_bitrate_kbps(target_height)
+            dur_sec = duration if duration > 0 else 180
+            return max(1, int((br * 1000 / 8 * dur_sec) / (1024 * 1024)))
+
+        best_v = max(v_candidates, key=lambda f: (f.get("height") or 0, f.get("tbr") or f.get("vbr") or 0))
+        v_bytes = best_v.get("filesize") or best_v.get("filesize_approx")
+
+        if not v_bytes and duration > 0:
+            v_bitrate = best_v.get("vbr") or best_v.get("tbr") or cls._fallback_bitrate_kbps(target_height)
+            v_bytes = (v_bitrate * 1000 / 8) * duration
+        elif not v_bytes:
+            default_mb = {480: 30, 720: 70, 1080: 160, 1440: 350, 2160: 850, 4320: 2000}.get(target_height, 80)
+            v_bytes = default_mb * 1024 * 1024
+
+        # If best_v is already combined (has audio)
+        if best_v.get("acodec") and best_v.get("acodec") != "none":
+            return max(1, int(v_bytes / (1024 * 1024)))
+
+        # Find audio format
+        a_candidates = [
+            f for f in formats 
+            if f.get("acodec") and f.get("acodec") != "none" and (not f.get("vcodec") or f.get("vcodec") == "none")
+        ]
+        a_bytes = 0
+        if a_candidates:
+            best_a = max(a_candidates, key=lambda f: f.get("abr") or f.get("tbr") or 0)
+            a_bytes = best_a.get("filesize") or best_a.get("filesize_approx") or 0
+            if not a_bytes and duration > 0:
+                a_bitrate = best_a.get("abr") or 128
+                a_bytes = (a_bitrate * 1000 / 8) * duration
+            elif not a_bytes:
+                a_bytes = 10 * 1024 * 1024
+
+        total_bytes = v_bytes + a_bytes
+        return max(1, int(total_bytes / (1024 * 1024)))
+
+    @classmethod
+    def estimate_audio_size_mb(cls, info: Dict[str, Any]) -> int:
+        """Estimate MP3 audio size in MB BEFORE downloading."""
+        duration = info.get("duration") or 0
+        formats = info.get("formats", [])
+        a_candidates = [
+            f for f in formats 
+            if f.get("acodec") and f.get("acodec") != "none" and (not f.get("vcodec") or f.get("vcodec") == "none")
+        ]
+        if a_candidates:
+            best_a = max(a_candidates, key=lambda f: f.get("abr") or f.get("tbr") or 0)
+            sz = best_a.get("filesize") or best_a.get("filesize_approx")
+            if sz:
+                return max(1, int(sz / (1024 * 1024)))
+
+        if duration > 0:
+            return max(1, int((320 * 1000 / 8 * duration) / (1024 * 1024)))
+        return 12
+
+    @classmethod
+    def get_info_and_resolutions(cls, url: str) -> Optional[Dict[str, Any]]:
+        """Extract metadata, estimate sizes, and list all available resolutions."""
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -53,13 +139,25 @@ class MediaDownloader:
                 available_options = []
                 for res_val, res_label in candidate_ladder:
                     if res_val <= max_h:
-                        available_options.append({"height": res_val, "label": res_label})
+                        est_mb = cls.estimate_video_size_mb(info, res_val)
+                        available_options.append({
+                            "height": res_val,
+                            "label": res_label,
+                            "est_mb": est_mb,
+                        })
 
                 if not available_options or available_options[-1]["height"] < max_h:
-                    available_options.append({"height": max_h, "label": f"{max_h}p (Max Source)"})
+                    est_mb = cls.estimate_video_size_mb(info, max_h)
+                    available_options.append({
+                        "height": max_h,
+                        "label": f"{max_h}p (Max Source)",
+                        "est_mb": est_mb,
+                    })
 
                 if not available_options:
-                    available_options = [{"height": 720, "label": "720p HD"}]
+                    available_options = [{"height": 720, "label": "720p HD", "est_mb": 50}]
+
+                audio_est_mb = cls.estimate_audio_size_mb(info)
 
                 return {
                     "title": info.get("title", "Video"),
@@ -68,6 +166,7 @@ class MediaDownloader:
                     "thumbnail": info.get("thumbnail"),
                     "max_height": max_h,
                     "resolutions": available_options,
+                    "audio_est_mb": audio_est_mb,
                 }
         except Exception as e:
             logger.error(f"Error extracting info for {url}: {e}")
