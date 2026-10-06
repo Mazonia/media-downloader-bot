@@ -1,6 +1,7 @@
 """
 Media Downloader Engine powered by yt-dlp.
 Supports dynamic multi-resolution ladder: 480p, 720p, 1080p, 1440p (2K), 2160p (4K), 4320p (8K).
+Includes smart chunk splitter for files delivered to Telegram.
 """
 
 import os
@@ -31,7 +32,6 @@ class MediaDownloader:
                 if not info:
                     return None
 
-                # Find all available heights with video codecs
                 raw_heights = set()
                 for f in info.get("formats", []):
                     h = f.get("height")
@@ -41,7 +41,6 @@ class MediaDownloader:
 
                 max_h = max(raw_heights) if raw_heights else 720
 
-                # Build resolution ladder starting from 480p up to max
                 candidate_ladder = [
                     (480, "480p (SD)"),
                     (720, "720p (HD)"),
@@ -51,17 +50,14 @@ class MediaDownloader:
                     (4320, "8K UHD (4320p)"),
                 ]
 
-                # Filter resolutions that are available or up to the max height
                 available_options = []
                 for res_val, res_label in candidate_ladder:
                     if res_val <= max_h:
                         available_options.append({"height": res_val, "label": res_label})
 
-                # If video has unusual resolution (e.g. 1088 or 1600), ensure max is represented
                 if not available_options or available_options[-1]["height"] < max_h:
                     available_options.append({"height": max_h, "label": f"{max_h}p (Max Source)"})
 
-                # Ensure at least 480p is available
                 if not available_options:
                     available_options = [{"height": 720, "label": "720p HD"}]
 
@@ -79,10 +75,7 @@ class MediaDownloader:
 
     @staticmethod
     def download_video_at_resolution(url: str, target_height: int) -> Tuple[Optional[Path], str, int]:
-        """
-        Download video at selected target height (e.g. 480, 720, 1080, 2160, 4320).
-        Returns: (file_path, title, file_size_mb)
-        """
+        """Download video at selected target height."""
         file_id = uuid.uuid4().hex[:8]
         out_tmpl = str(config.DOWNLOAD_DIR / f"vid_{file_id}.%(ext)s")
 
@@ -144,3 +137,26 @@ class MediaDownloader:
         except Exception as e:
             logger.error(f"Audio extraction failed for {url}: {e}")
             return None, f"Extraction error: {str(e)[:120]}", 0
+
+    @staticmethod
+    def split_file_for_telegram(file_path: Path, max_part_size_mb: int = 48) -> List[Path]:
+        """Split any file larger than 50MB into clean parts for Telegram delivery."""
+        part_size_bytes = max_part_size_mb * 1024 * 1024
+        total_size = file_path.stat().st_size
+        if total_size <= part_size_bytes:
+            return [file_path]
+
+        parts = []
+        base_name = file_path.name
+        part_num = 1
+        with open(file_path, "rb") as f_in:
+            while True:
+                chunk = f_in.read(part_size_bytes)
+                if not chunk:
+                    break
+                part_path = file_path.parent / f"{base_name}.part{part_num}"
+                with open(part_path, "wb") as f_out:
+                    f_out.write(chunk)
+                parts.append(part_path)
+                part_num += 1
+        return parts

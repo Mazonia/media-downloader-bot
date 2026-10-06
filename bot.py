@@ -1,5 +1,6 @@
 """
-Telegram Media Downloader Bot — Multi-Resolution Edition (480p to 4K/8K)
+Telegram Media Downloader Bot — 100MB Threshold Edition
+Prompts user to choose Server vs Phone when crossing 100MB.
 """
 
 import os
@@ -29,7 +30,7 @@ from telegram.ext import (
 import config
 from downloader import MediaDownloader
 
-# Set distinct Windows console and task manager title
+# Set Windows console and Task Manager title
 try:
     ctypes.windll.kernel32.SetConsoleTitleW("Media-Downloader-Bot")
 except Exception:
@@ -37,22 +38,24 @@ except Exception:
 
 URL_REGEX = re.compile(r'https?://(?:www\.)?[a-zA-Z0-9./?=_&%#~+-]+')
 url_cache: dict[str, str] = {}
+# Holds pending files that crossed 100MB: {job_id: {"file_path": Path, "title": str, "size_mb": int}}
+pending_delivery: dict[str, dict] = {}
 
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Welcome and instructions."""
     text = (
         "🎬 <b>MULTI-RESOLUTION MEDIA DOWNLOADER</b> 🚀\n\n"
         "Send or forward me any video link from:\n"
         "• <b>YouTube</b>, <b>TikTok</b>, <b>Instagram</b>, <b>X / Twitter</b>, <b>Reddit</b> & 1000+ sites\n\n"
-        "I will detect the video's quality and let you pick your exact resolution from <b>480p up to 4K / 8K UHD</b>!\n\n"
+        "<b>Features:</b>\n"
+        "• Quality from <b>480p up to 4K / 8K UHD</b>\n"
+        "• <b>100MB Threshold Guard:</b> If a video crosses 100MB, you decide whether to keep it on your PC Server or send to your Phone!\n\n"
         "<i>Paste a link below to get started:</i>"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Detect link, extract resolution ladder, and prompt user."""
     text = update.message.text or ""
     matches = URL_REGEX.findall(text)
     if not matches:
@@ -63,11 +66,10 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     req_id = uuid.uuid4().hex[:8]
     url_cache[req_id] = url
 
-    msg = await update.message.reply_text("🔍 <i>Detecting available resolutions...</i>", parse_mode="HTML")
+    msg = await update.message.reply_text("🔍 <i>Inspecting video source for resolutions...</i>", parse_mode="HTML")
 
     data = MediaDownloader.get_info_and_resolutions(url)
     if not data:
-        # Fallback choices if extraction had warnings
         title = "Video Link"
         uploader = "Creator"
         duration_str = "Clip"
@@ -84,7 +86,6 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         duration_str = f"{minutes}:{seconds:02d}" if dur else "Reel/Short"
         resolutions = data["resolutions"]
 
-    # Build buttons for each detected resolution
     button_rows = []
     current_row = []
     for res in resolutions:
@@ -96,11 +97,9 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if current_row:
         button_rows.append(current_row)
 
-    # Audio option
     button_rows.append([InlineKeyboardButton("🎵 Extract Audio (MP3 320k)", callback_data=f"dl_mp3_{req_id}")])
 
     keyboard = InlineKeyboardMarkup(button_rows)
-
     card_text = (
         f"📹 <b>{html.escape(title[:60])}</b>\n"
         f"👤 <b>Creator:</b> {html.escape(uploader)}\n"
@@ -111,8 +110,46 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await msg.edit_text(card_text, reply_markup=keyboard, parse_mode="HTML")
 
 
+async def deliver_to_phone(query, file_path: Path, title: str, size_mb: int):
+    """Deliver file to phone; if > 50MB, splits into parts so Telegram allows it."""
+    if size_mb <= 50:
+        await query.edit_message_text(f"📤 <b>Uploading video ({size_mb} MB) to your phone...</b>", parse_mode="HTML")
+        with open(file_path, "rb") as f:
+            await query.message.reply_video(
+                video=f,
+                caption=f"🎬 <b>{html.escape(title[:60])}</b>\n📦 Size: {size_mb} MB",
+                parse_mode="HTML",
+                supports_streaming=True
+            )
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+    else:
+        await query.edit_message_text(
+            f"📤 <b>File is {size_mb} MB (>50MB Telegram single upload limit)</b>\n"
+            f"<i>Splitting and uploading {size_mb} MB to your phone in parts...</i>",
+            parse_mode="HTML"
+        )
+        parts = MediaDownloader.split_file_for_telegram(file_path, max_part_size_mb=48)
+        for idx, part_p in enumerate(parts, 1):
+            with open(part_p, "rb") as f:
+                await query.message.reply_document(
+                    document=f,
+                    caption=f"📦 <b>{html.escape(title[:45])}</b> — Part {idx}/{len(parts)}",
+                    parse_mode="HTML"
+                )
+            try:
+                os.remove(part_p)
+            except Exception:
+                pass
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+
+
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle resolution click and start download."""
     query = update.callback_query
     if not query:
         return
@@ -120,6 +157,36 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
     parts = data.split("_")
+
+    # Handle Server vs Phone choice for files > 100MB
+    if parts[0] == "dest":
+        choice = parts[1]  # 'server' or 'phone'
+        job_id = parts[2]
+        item = pending_delivery.get(job_id)
+        if not item:
+            await query.edit_message_text("⚠️ Selection expired.")
+            return
+
+        file_p = item["file_path"]
+        title = item["title"]
+        size_mb = item["size_mb"]
+
+        if choice == "server":
+            await query.edit_message_text(
+                f"✅ <b>Kept on PC / Server ({size_mb} MB)!</b>\n\n"
+                f"<b>Title:</b> {html.escape(title)}\n"
+                f"<b>Local Path:</b>\n<code>{file_p}</code>\n\n"
+                f"💾 <i>File is safely saved on your PC storage without using mobile data.</i>",
+                parse_mode="HTML"
+            )
+            del pending_delivery[job_id]
+        elif choice == "phone":
+            await deliver_to_phone(query, file_p, title, size_mb)
+            if job_id in pending_delivery:
+                del pending_delivery[job_id]
+        return
+
+    # Regular download trigger
     if len(parts) < 3:
         return
 
@@ -131,63 +198,64 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     label = f"{res_type}p Video" if res_type.isdigit() else "MP3 Audio"
-    await query.edit_message_text(f"⏳ <b>Downloading in {label}...</b>\n<i>Streaming high-quality segments...</i>", parse_mode="HTML")
+    await query.edit_message_text(f"⏳ <b>Downloading {label}...</b>\n<i>Fetching media stream...</i>", parse_mode="HTML")
 
-    downloaded_file = None
-    try:
-        if res_type.isdigit():
-            target_h = int(res_type)
-            file_path, title, size_mb = MediaDownloader.download_video_at_resolution(url, target_h)
-            if file_path and file_path.exists():
-                downloaded_file = file_path
+    if res_type.isdigit():
+        target_h = int(res_type)
+        file_path, title, size_mb = MediaDownloader.download_video_at_resolution(url, target_h)
+        if not file_path or not file_path.exists():
+            await query.edit_message_text(f"❌ {title}")
+            return
 
-                if size_mb > 50:
-                    # Inform user file is saved locally due to Telegram Bot API 50MB direct upload cap
-                    await query.edit_message_text(
-                        f"✅ <b>Downloaded in {target_h}p ({size_mb} MB)!</b>\n\n"
-                        f"<b>Title:</b> {html.escape(title)}\n"
-                        f"<b>Saved on PC:</b>\n<code>{file_path}</code>\n\n"
-                        f"ℹ️ <i>Telegram Bot API limits direct chat uploads to 50MB. Your full-resolution {size_mb}MB file is saved safely on your PC!</i>",
-                        parse_mode="HTML"
-                    )
-                    return
+        # ── 100MB THRESHOLD CHECK ──────────────────────────────────────
+        if size_mb > config.DELIVERY_THRESHOLD_MB:
+            import uuid
+            job_id = uuid.uuid4().hex[:8]
+            pending_delivery[job_id] = {
+                "file_path": file_path,
+                "title": title,
+                "size_mb": size_mb,
+            }
 
-                await query.edit_message_text(f"📤 <b>Uploading {target_h}p video ({size_mb} MB) to Telegram...</b>", parse_mode="HTML")
-                with open(file_path, "rb") as f:
-                    await query.message.reply_video(
-                        video=f,
-                        caption=f"🎬 <b>{html.escape(title[:60])}</b>\n📺 Quality: {target_h}p | {size_mb} MB",
-                        parse_mode="HTML",
-                        supports_streaming=True
-                    )
-            else:
-                await query.edit_message_text(f"❌ {title}")
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("💾 Keep on PC / Server", callback_data=f"dest_server_{job_id}"),
+                    InlineKeyboardButton("📱 Send to Phone", callback_data=f"dest_phone_{job_id}"),
+                ]
+            ])
 
-        elif res_type == "mp3":
-            file_path, title, size_mb = MediaDownloader.download_audio(url)
-            if file_path and file_path.exists():
-                downloaded_file = file_path
-                await query.edit_message_text("📤 <b>Uploading MP3 audio to Telegram...</b>", parse_mode="HTML")
-                with open(file_path, "rb") as f:
-                    await query.message.reply_audio(
-                        audio=f,
-                        title=title[:40],
-                        caption=f"🎵 <b>{html.escape(title[:60])}</b>\n📦 Size: {size_mb} MB",
-                        parse_mode="HTML"
-                    )
-            else:
-                await query.edit_message_text(f"❌ {title}")
+            await query.edit_message_text(
+                f"📦 <b>FILE SIZE NOTICE: {size_mb} MB</b>\n"
+                f"{'━' * 28}\n\n"
+                f"<b>Title:</b> {html.escape(title[:60])}\n"
+                f"<b>Quality:</b> {target_h}p\n"
+                f"<b>Size:</b> <code>{size_mb} MB</code> (Exceeds {config.DELIVERY_THRESHOLD_MB} MB threshold)\n\n"
+                f"<b>Where would you like to deliver this media?</b>",
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
 
-    except Exception as e:
-        logger.error(f"Download flow failed: {e}")
-        await query.message.reply_text(f"⚠️ Error: {e}")
-    finally:
-        # Auto clean up files <= 50MB that were delivered
-        if downloaded_file and downloaded_file.exists() and downloaded_file.stat().st_size <= 50 * 1024 * 1024:
+        # File is <= 100MB: Deliver directly to phone
+        await deliver_to_phone(query, file_path, title, size_mb)
+
+    elif res_type == "mp3":
+        file_path, title, size_mb = MediaDownloader.download_audio(url)
+        if file_path and file_path.exists():
+            await query.edit_message_text("📤 <b>Uploading MP3 audio to Telegram...</b>", parse_mode="HTML")
+            with open(file_path, "rb") as f:
+                await query.message.reply_audio(
+                    audio=f,
+                    title=title[:40],
+                    caption=f"🎵 <b>{html.escape(title[:60])}</b>\n📦 Size: {size_mb} MB",
+                    parse_mode="HTML"
+                )
             try:
-                os.remove(downloaded_file)
+                os.remove(file_path)
             except Exception:
                 pass
+        else:
+            await query.edit_message_text(f"❌ {title}")
 
 
 def main():
@@ -209,7 +277,7 @@ def main():
             pass
 
     app.post_init = post_init
-    logger.info("🎬 Media Downloader Bot is running (Multi-Resolution Edition)...")
+    logger.info("🎬 Media Downloader Bot is running (100MB Threshold Edition)...")
     app.run_polling()
 
 
