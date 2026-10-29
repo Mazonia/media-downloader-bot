@@ -99,5 +99,19 @@ Features an intelligent **Pre-Download 100MB File Size Guard**: files exceeding 
 
 ---
 
-## 📄 License
+## FAQ - Frequently Asked Questions
+
+### What platforms can this Telegram bot download from?
+The bot supports YouTube (Shorts and up to 8K videos), TikTok (without watermark), Instagram (Reels, Stories, and Carousels), Twitter / X, Reddit, Facebook, Pinterest, Vimeo, and over 1000+ websites supported by yt-dlp.
+
+### How does the bot bypass Telegram's 50MB file size limit?
+When a requested video exceeds Telegram's 50MB file limit, the bot automatically chunks the media into seamless 48MB parts. Alternatively, the pre-download size guard gives users the choice to save the full uncompressed file directly onto their PC disk without consuming mobile data.
+
+### Is FFmpeg required to run this bot?
+Yes. FFmpeg is essential for high-resolution video streams (1080p, 2K, 4K, 8K) and studio-quality 320 kbps MP3 audio conversion, as platforms like YouTube store high-res video and audio on separate DASH streams.
+
+---
+
+## License
+
 This project is licensed under the GNU Affero General Public License v3.0 - see the [LICENSE](LICENSE) file for details.

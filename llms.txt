@@ -1,0 +1,49 @@
+# Social Media Video & Audio Downloader Telegram Bot
+
+> High-performance Telegram bot that extracts and downloads ultra-high-definition videos (480p up to 8K UHD) and crystal-clear MP3 audio (320 kbps) from 1000+ social media platforms with intelligent pre-download size guard and chunked delivery.
+
+## Project Overview
+- **Name:** Telegram Media Downloader Bot
+- **Repository:** https://github.com/Mazonia/media-downloader-bot
+- **License:** MIT
+- **Runtime:** Python 3.10+
+- **Core Dependencies:** `python-telegram-bot` v21+, `yt-dlp`, `ffmpeg`
+
+## Supported Platforms
+- **YouTube:** Standard videos, live stream VODs, and Shorts in 480p, 720p, 1080p, 2K, 4K, and 8K.
+- **TikTok:** High-definition video downloads with automatic watermark removal.
+- **Instagram:** Reels, video posts, stories, and multi-slide carousel albums.
+- **Twitter / X:** Native MP4 extraction with audio sync.
+- **Reddit:** Merges separate Reddit video and DASH audio streams cleanly via FFmpeg.
+- **Other Sites:** Facebook, Pinterest, Vimeo, Twitch clips, Soundcloud, and 1000+ sources supported by yt-dlp.
+
+## Key Capabilities
+- **Pre-Download 100MB Size Guard:** Estimates media size before downloading to disk. If exceeding 100MB, prompts user to save locally to PC disk (zero mobile data) or chunk and send to Telegram.
+- **Dynamic Quality Ladder:** Probes source stream metadata and generates interactive inline buttons for only the qualities actually available.
+- **Audio Extraction Engine:** Converts video streams directly into high-bitrate MP3 (320 kbps) with embedded cover art and metadata tags.
+- **Automatic Chunk Splitter:** Seamlessly bypasses Telegram's 50MB bot upload cap by splitting large videos into 48MB parts.
+
+## Quickstart & Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/Mazonia/media-downloader-bot.git
+cd media-downloader-bot
+
+# Set up virtual environment
+python -m venv venv
+.\venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Ensure FFmpeg is installed and on system PATH
+ffmpeg -version
+
+# Configure environment variables
+copy .env.example .env
+# Edit .env with BOT_TOKEN and ALLOWED_USER_IDS
+
+# Start the bot
+python bot.py
+```
